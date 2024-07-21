@@ -332,16 +332,16 @@ bool AppController::wifi_event(APP_MESSAGE_TYPE type)
     {
         // 更新请求
         // CONN_ERROR == g_network.end_conn_wifi() ||
-        if (false == m_wifi_status)
-        {
-            g_network.start_conn_wifi(sys_cfg.ssid_0.c_str(), sys_cfg.password_0.c_str());
-            m_wifi_status = true;
-        }
+
+        // wifi连接请求时就重置请求时间戳，避免在节能模式下超时自动关闭wifi
         m_preWifiReqMillis = GET_SYS_MILLIS();
-        if ((WiFi.getMode() & WIFI_MODE_STA) == WIFI_MODE_STA && CONN_SUCC != g_network.end_conn_wifi())
+        if (WiFi.status() != WL_CONNECTED)
         {
-            // 在STA模式下 并且还没连接上wifi
-            return false;
+            if ( g_network.start_conn_wifi(sys_cfg.ssid_0.c_str(), sys_cfg.password_0.c_str()) ){
+                m_wifi_status = true;
+            }else{
+                return false;
+            }
         }
     }
     break;

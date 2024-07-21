@@ -53,7 +53,7 @@ boolean Network::start_conn_wifi(const char *ssid, const char *password)
     if (WiFi.status() == WL_CONNECTED)
     {
         Serial.println(F("\nWiFi is OK.\n"));
-        return false;
+        return true;
     }
     Serial.println("");
     Serial.print(F("Connecting: "));
@@ -69,8 +69,16 @@ boolean Network::start_conn_wifi(const char *ssid, const char *password)
     // 修改主机名
     WiFi.setHostname(HOST_NAME);
     WiFi.begin(ssid, password);
-    m_preDisWifiConnInfoMillis = GET_SYS_MILLIS();
-
+    WiFi.waitForConnectResult();
+    if (WiFi.status() == WL_CONNECTED)
+    {
+        m_preDisWifiConnInfoMillis = GET_SYS_MILLIS();
+        Serial.println(F("\nWiFi is OK.\n"));
+        return true;
+    }else{
+        Serial.println(F("\nWiFi connect error.\n"));
+        return false;
+    }
     // if (!WiFi.config(local_ip, gateway, subnet, dns))
     // { //WiFi.config(ip, gateway, subnet, dns1, dns2);
     // 	Serial.println("WiFi STATION Failed to configure Correctly");
@@ -91,8 +99,6 @@ boolean Network::start_conn_wifi(const char *ssid, const char *password)
     // 	Serial.println(F("Error setting up MDNS responder!"));
     // 	ESP.restart();
     // }
-
-    return true;
 }
 
 boolean Network::end_conn_wifi(void)
