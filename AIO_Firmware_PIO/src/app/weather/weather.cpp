@@ -9,10 +9,14 @@
 #include <map>
 
 #define WEATHER_APP_NAME "Weather"
+// http://v0.yiketianqi.com/free/v2031?appid=21531477&appsecret=XVYYEV8l&city=
+#define WEATHER_DEFAULT_API "http://v0.yiketianqi.com/free/v2031"
 #define WEATHER_NOW_API "https://www.yiketianqi.com/free/day?appid=%s&appsecret=%s&unescape=1&city=%s"
 // v1.yiketianqi.com/api?unescape=1&version=v61
-#define WEATHER_NOW_API_UPDATE "https://%s&appid=%s&appsecret=%s&city=%s"
-#define WEATHER_DALIY_API "https://www.yiketianqi.com/free/week?unescape=1&appid=%s&appsecret=%s&city=%s"
+// #define WEATHER_NOW_API_UPDATE "https://%s&appid=%s&appsecret=%s&city=%s"
+#define WEATHER_NOW_API_UPDATE WEATHER_DEFAULT_API "&version=v63"
+// #define WEATHER_DAILY_API "https://www.yiketianqi.com/free/week?unescape=1&appid=%s&appsecret=%s&city=%s"
+#define WEATHER_DAILY_API WEATHER_DEFAULT_API "&version=v9"
 #define TIME_API "http://api.m.taobao.com/rest/api3.do?api=mtop.common.gettimestamp"
 #define WEATHER_PAGE_SIZE 2
 #define UPDATE_WEATHER 0x01       // 更新天气
@@ -59,7 +63,8 @@ static void read_config(WT_Config *cfg)
     if (size == 0)
     {
         // 默认值
-        cfg->tianqi_url = "v1.yiketianqi.com/api?unescape=1&version=v61";
+        // cfg->tianqi_url = "v1.yiketianqi.com/api?unescape=1&version=v61";
+        cfg->tianqi_url = WEATHER_DEFAULT_API;
         cfg->tianqi_addr = "北京";
         cfg->weatherUpdataInterval = 900000; // 天气更新的时间间隔900000(900s)
         cfg->timeUpdataInterval = 900000;    // 日期时钟更新的时间间隔900000(900s)
@@ -76,6 +81,11 @@ static void read_config(WT_Config *cfg)
         cfg->tianqi_addr = param[3];
         cfg->weatherUpdataInterval = atol(param[4]);
         cfg->timeUpdataInterval = atol(param[5]);
+
+        // 默认URL
+        if(cfg->tianqi_url.isEmpty()){
+            cfg->tianqi_url = WEATHER_DEFAULT_API;
+        }
     }
 }
 
@@ -124,6 +134,88 @@ static int windLevelAnalyse(String str)
     return ret;
 }
 
+static void get_weather_all()
+{
+    if (WL_CONNECTED != WiFi.status())
+        return;
+
+    HTTPClient http;
+    http.setTimeout(15000);
+    char api[128] = {0};
+    // 获取当前与未来七天天气，未指定城市时获取当前IP所在城市的天气
+    snprintf(api, 128, "%s?appid=%s&appsecret=%s&city=%s",
+            cfg_data.tianqi_url.c_str(),
+            cfg_data.tianqi_appid.c_str(),
+            cfg_data.tianqi_appsecret.c_str(),
+            cfg_data.tianqi_addr.c_str());
+
+    Serial.print("API = ");
+    Serial.println(api);
+    http.begin(api);
+
+    int httpCode = http.GET();
+    if (httpCode > 0)
+    {
+        // file found at server
+        if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY)
+        {
+            String payload = http.getString();
+            Serial.println(payload);
+            DynamicJsonDocument doc(8192);
+            DeserializationError error = deserializeJson(doc, payload);
+            if (error == DeserializationError::Ok) {
+                JsonObject sk = doc.as<JsonObject>();
+
+                // 获取当前城市名
+                strcpy(run_data->wea.cityname, sk["city"].as<String>().c_str());
+
+                // 获取当天天气信息
+                JsonObject day = sk["day"].as<JsonObject>();
+                // 当天天气情况图标
+                run_data->wea.weather_code = weatherMap[day["wea_img"].as<String>()];
+                // 时时温度
+                run_data->wea.temperature = day["tem"].as<int>();
+                // 获取湿度
+                run_data->wea.humidity = 50;
+                char humidity[8] = {0};
+                strncpy(humidity, day["humidity"].as<String>().c_str(), 8);
+                humidity[strlen(humidity) - 1] = 0; // 去除尾部的 % 号
+                run_data->wea.humidity = atoi(humidity);
+                // 获取当天最高温与最低温
+                run_data->wea.maxTemp = day["tem1"].as<int>();
+                run_data->wea.minTemp = day["tem2"].as<int>();
+                // 获取当天风向与风力
+                strcpy(run_data->wea.windDir, day["win"].as<String>().c_str());
+                run_data->wea.windLevel = windLevelAnalyse(day["win_speed"].as<String>());
+                // 获取当天空气质量
+                run_data->wea.airQulity = airQulityLevel(day["air"].as<int>());
+
+                // 获取未来一星期天气情况
+                JsonArray week = sk["week"].as<JsonArray>();
+                // 获取每日最高温与最低温
+                int gDW_i = 0;
+                for (JsonObject day : week) {
+                    if(gDW_i<7){
+                        run_data->wea.daily_max[gDW_i] = day["tem1"].as<int>();
+                        run_data->wea.daily_min[gDW_i] = day["tem2"].as<int>();
+                    }
+                    gDW_i++;
+                }
+            }else{
+                Serial.print(F("deserializeJson() failed: "));
+                Serial.println(error.f_str());
+            }
+        }else{
+            Serial.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
+        }
+    }
+    else
+    {
+        Serial.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
+    }
+    http.end();
+}
+
 static void get_weather(void)
 {
     if (WL_CONNECTED != WiFi.status())
@@ -132,11 +224,21 @@ static void get_weather(void)
     HTTPClient http;
     http.setTimeout(1000);
     char api[128] = {0};
-    snprintf(api, 128, WEATHER_NOW_API_UPDATE,
-             cfg_data.tianqi_url.c_str(),
-             cfg_data.tianqi_appid.c_str(),
-             cfg_data.tianqi_appsecret.c_str(),
-             cfg_data.tianqi_addr.c_str());
+
+    // 未指定城市，则获取当前IP所在城市天气
+    if(cfg_data.tianqi_addr.isEmpty()){
+        snprintf(api, 128, "http://%s&version=v63&appid=%s&appsecret=%s",
+                cfg_data.tianqi_url.c_str(),
+                cfg_data.tianqi_appid.c_str(),
+                cfg_data.tianqi_appsecret.c_str());
+    }else{
+        snprintf(api, 128, "http://%s&version=v63&appid=%s&appsecret=%s&city=%s",
+                cfg_data.tianqi_url.c_str(),
+                cfg_data.tianqi_appid.c_str(),
+                cfg_data.tianqi_appsecret.c_str(),
+                cfg_data.tianqi_addr.c_str());
+    }
+
     Serial.print("API = ");
     Serial.println(api);
     http.begin(api);
@@ -227,12 +329,21 @@ static void get_daliyWeather(short maxT[], short minT[])
         return;
 
     HTTPClient http;
-    http.setTimeout(1000);
+    http.setTimeout(15000);
     char api[128] = {0};
-    snprintf(api, 128, WEATHER_DALIY_API,
-             cfg_data.tianqi_appid.c_str(),
-             cfg_data.tianqi_appsecret.c_str(),
-             cfg_data.tianqi_addr.c_str());
+    // 获取未来七天天气，未指定城市时获取当前IP所在城市的天气
+    if(cfg_data.tianqi_addr.isEmpty()){
+        snprintf(api, 128, "https://%s&version=v9&appid=%s&appsecret=%s",
+                cfg_data.tianqi_url.c_str(),
+                cfg_data.tianqi_appid.c_str(),
+                cfg_data.tianqi_appsecret.c_str());
+    }else{
+        snprintf(api, 128, "https://%s&version=v9&appid=%s&appsecret=%s&city=%s",
+                cfg_data.tianqi_url.c_str(),
+                cfg_data.tianqi_appid.c_str(),
+                cfg_data.tianqi_appsecret.c_str(),
+                cfg_data.tianqi_addr.c_str());
+    }
     Serial.print("API = ");
     Serial.println(api);
     http.begin(api);
@@ -246,13 +357,23 @@ static void get_daliyWeather(short maxT[], short minT[])
             String payload = http.getString();
             Serial.println(payload);
             DynamicJsonDocument doc(2048);
-            deserializeJson(doc, payload);
-            JsonObject sk = doc.as<JsonObject>();
-            for (int gDW_i = 0; gDW_i < 7; ++gDW_i)
-            {
-                maxT[gDW_i] = sk["data"][gDW_i]["tem_day"].as<int>();
-                minT[gDW_i] = sk["data"][gDW_i]["tem_night"].as<int>();
+            DeserializationError error = deserializeJson(doc, payload);
+            if (error == DeserializationError::Ok) {
+                JsonObject sk = doc.as<JsonObject>();
+                JsonArray data = sk["data"].as<JsonArray>();
+                // 遍历数组并打印每一天的 tem1 值
+                int gDW_i = 0;
+                for (JsonObject day : data) {
+                    maxT[gDW_i] = day["tem1"].as<int>();
+                    minT[gDW_i] = day["tem2"].as<int>();
+                    gDW_i++;
+                }
+            }else{
+                Serial.print(F("deserializeJson() failed: "));
+                Serial.println(error.f_str());
             }
+        }else{
+            Serial.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
         }
     }
     else
@@ -346,8 +467,8 @@ static void weather_process(AppController *sys,
         {
             sys->send_to(WEATHER_APP_NAME, CTRL_NAME,
                          APP_MESSAGE_WIFI_CONN, (void *)UPDATE_NOW, NULL);
-            sys->send_to(WEATHER_APP_NAME, CTRL_NAME,
-                         APP_MESSAGE_WIFI_CONN, (void *)UPDATE_DAILY, NULL);
+            // sys->send_to(WEATHER_APP_NAME, CTRL_NAME,
+            //              APP_MESSAGE_WIFI_CONN, (void *)UPDATE_DAILY, NULL);
         }
 
         if (0x01 == run_data->coactusUpdateFlag || doDelayMillisTime(cfg_data.timeUpdataInterval, &run_data->preTimeMillis, false))
@@ -451,10 +572,15 @@ static void weather_message_handle(const char *from, const char *to,
             Serial.print(F("weather update.\n"));
             run_data->update_type |= UPDATE_WEATHER;
 
-            get_weather();
+            // get_weather();
+            get_weather_all();
             if (run_data->clock_page == 0)
             {
                 display_weather(run_data->wea, LV_SCR_LOAD_ANIM_NONE);
+            }
+            if (run_data->clock_page == 1)
+            {
+                display_curve(run_data->wea.daily_max, run_data->wea.daily_min, LV_SCR_LOAD_ANIM_NONE);
             }
         };
         break;
